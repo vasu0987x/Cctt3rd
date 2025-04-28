@@ -1,1 +1,1 @@
-web: python host_discovery_bot.py
+web: python bot.py
