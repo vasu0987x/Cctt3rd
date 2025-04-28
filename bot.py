@@ -1,4 +1,4 @@
-# main.py
+# bot.py
 
 import subprocess
 import asyncio
@@ -94,22 +94,24 @@ async def run_web_server():
     print(f"Web server running on port {PORT}")
 
 async def main():
-    bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_ip))
-    bot_app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_ip))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Run telegram bot polling + web server together
+    # Initialize app first
+    await app.initialize()
+
+    # Start web server and telegram app together
     await asyncio.gather(
-        bot_app.initialize(),
         run_web_server(),
-        bot_app.start(),
-        bot_app.updater.start_polling()
+        app.start(),
+        app.updater.start_polling()
     )
 
-    # Don't let the program exit
-    await bot_app.updater.idle()
+    # Wait for shutdown
+    await app.updater.idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
