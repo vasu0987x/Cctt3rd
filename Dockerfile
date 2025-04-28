@@ -1,12 +1,20 @@
-FROM python:3.11-slim
+# Python ka lightweight latest version
+FROM python:3.11-slim  
 
-WORKDIR /app
+# Working directory set kar rahe
+WORKDIR /app  
 
-COPY . .
+# Sab files container ke andar copy karenge
+COPY . .  
 
-RUN apt update && apt install -y nmap
+# System update aur nmap install karenge
+RUN apt update && apt install -y nmap  
 
-# YEH LINE AB ADD KAR:
-RUN pip install --no-cache-dir "python-telegram-bot[webhooks]==20.3" aiohttp
+# Telegram bot ke liye required packages install karenge
+RUN pip install --no-cache-dir "python-telegram-bot[webhooks]" aiohttp  
 
-CMD ["python", "bot.py"]
+# Port expose kar rahe webhook ke liye
+EXPOSE 8080  
+
+# Container start hote hi bot chalega
+CMD ["python", "bot.py"]  
