@@ -1,1 +1,1 @@
-web: python nmapbot.py
+web: python scanbot.py
