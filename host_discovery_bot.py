@@ -342,7 +342,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Please use /start to choose an option.")
         return
 
-    target = update.message.text—(cidr, strict=False)
+    target = update.message.text(cidr, strict=False)
     mode = awaiting_input[chat_id]
 
     # Start new scan
