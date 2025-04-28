@@ -1,13 +1,12 @@
-# main.py
-
 import subprocess
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web
 
 BOT_TOKEN = '8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8'
+PORT = 8080
 
-# Dictionary to store user scans
 user_scans = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -19,12 +18,10 @@ async def get_ip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Starting scan on {ip_range}...")
 
-    # Start nmap scan asynchronously
     await scan_network(ip_range, update, context, user_id)
 
 async def scan_network(ip_range, update, context, user_id):
     try:
-        # Run nmap ping scan
         result = subprocess.check_output(["nmap", "-sn", ip_range], text=True)
 
         hosts = []
@@ -40,10 +37,8 @@ async def scan_network(ip_range, update, context, user_id):
             await update.message.reply_text("No live hosts found.")
             return
 
-        # Save scan results
         user_scans[user_id] = hosts
 
-        # Build buttons
         buttons = []
         for ip in hosts:
             buttons.append([InlineKeyboardButton(ip, callback_data=ip)])
@@ -65,7 +60,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Try to fetch MAC address using ARP
         arp_result = subprocess.check_output(["arp", "-n", selected_ip], text=True)
 
         mac_address = "Unknown"
@@ -84,16 +78,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text(f"Error fetching details: {str(e)}")
 
-def main():
+# Web server for Koyeb health check
+async def handle(request):
+    return web.Response(text="OK")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"Web server running on port {PORT}")
+
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_ip))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("Bot is running...")
-    app.run_polling()
+    # Run both Telegram bot and web server concurrently
+    await asyncio.gather(
+        app.run_polling(),
+        run_web_server()
+    )
 
 if __name__ == "__main__":
-    main()
-    
+    asyncio.run(main())
