@@ -1,3 +1,5 @@
+# main.py
+
 import subprocess
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -92,17 +94,22 @@ async def run_web_server():
     print(f"Web server running on port {PORT}")
 
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_ip))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, get_ip))
+    bot_app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Run both Telegram bot and web server concurrently
+    # Run telegram bot polling + web server together
     await asyncio.gather(
-        app.run_polling(),
-        run_web_server()
+        bot_app.initialize(),
+        run_web_server(),
+        bot_app.start(),
+        bot_app.updater.start_polling()
     )
+
+    # Don't let the program exit
+    await bot_app.updater.idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
