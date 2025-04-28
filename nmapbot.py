@@ -5,7 +5,7 @@ import nmap
 import dns.resolver
 import dns.reversename
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from aiohttp import web
 import os
 os.system('pip install python-telegram-bot==20.7 --force-reinstall')
@@ -291,7 +291,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     logger.info("Bot starting...")
     try:
-        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        app = Application.builder().token(BOT_TOKEN).build()
         logger.info(f"Bot initialized with token: {BOT_TOKEN[:10]}...")
     except Exception as e:
         logger.error(f"Error initializing bot: {str(e)}")
