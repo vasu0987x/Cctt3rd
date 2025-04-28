@@ -2,11 +2,11 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8")
 KOYEB_APP_NAME = os.getenv("KOYEB_APP_NAME")
 
-WEBHOOK_PATH = f"/webhook/{8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8}"
-WEBHOOK_URL = f"https://{Cctv3}.koyeb.app{WEBHOOK_PATH}"
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"https://{KOYEB_APP_NAME}.koyeb.app{WEBHOOK_PATH}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot is running on webhook!")
@@ -29,4 +29,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
