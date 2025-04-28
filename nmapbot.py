@@ -280,7 +280,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}")
     try:
-        if update:
+        if update and update.message:
             await update.message.reply_text("⚠️ An error occurred, please try again later.")
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID, text=f"⚠️ Bot error: {str(context.error)}"
@@ -289,31 +289,24 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Failed to notify admin: {e}")
 
 async def main():
-    logger.info("Bot starting...")
-    try:
-        app = Application.builder().token(BOT_TOKEN).build()
-        logger.info(f"Bot initialized with token: {BOT_TOKEN[:10]}...")
-    except Exception as e:
-        logger.error(f"Error initializing bot: {str(e)}")
-        raise
+    logging.info("Bot starting...")
 
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scan", scan))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, scan))
-    app.add_handler(CallbackQueryHandler(button_click))
+
+    # Error handler
     app.add_error_handler(error_handler)
 
-    http_runner = await start_http_server()
+    # Start background HTTP server (for health checks)
+    asyncio.create_task(start_http_server())
 
-    try:
-        await app.run_polling()
-        logger.info("Bot polling started")
-    except Exception as e:
-        logger.error(f"Error running bot: {str(e)}")
-        await http_runner.cleanup()
-        raise
+    # Start the bot
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
