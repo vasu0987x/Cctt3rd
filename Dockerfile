@@ -6,6 +6,7 @@ COPY . .
 
 RUN apt update && apt install -y nmap
 
+# YEH LINE AB ADD KAR:
 RUN pip install --no-cache-dir "python-telegram-bot[webhooks]==20.3" aiohttp
 
 CMD ["python", "bot.py"]
