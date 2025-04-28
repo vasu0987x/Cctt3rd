@@ -1,4 +1,3 @@
-```python
 import asyncio
 import logging
 import time
@@ -14,9 +13,9 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(m
 logger = logging.getLogger(__name__)
 
 # Bot configuration
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your BotFather token
-ADMIN_CHAT_ID = "YOUR_ADMIN_CHAT_ID"  # Replace with your Telegram chat ID
-GROUP_ID = "YOUR_GROUP_ID"  # Optional: Replace with group chat ID for results
+BOT_TOKEN = "8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8"  # Replace with your BotFather token
+ADMIN_CHAT_ID = "6972264549"  # Replace with your Telegram chat ID
+GROUP_ID = "-1002522049841"  # Optional: Replace with group chat ID for results
 
 # Global storage
 scan_results = {}
@@ -337,4 +336,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
