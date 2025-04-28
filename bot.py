@@ -1,69 +1,91 @@
 import os
 import asyncio
-from aiohttp import web
-from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+import subprocess
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Bot Token aur Channel ID
 BOT_TOKEN = "8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8"
-CHANNEL_ID = -1002522049841
-APP_NAME = "cctv3"
+CHANNEL_ID = "-1002522049841"
+APP_URL = "https://cctv3.koyeb.app"  # apna Koyeb app URL
 
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-WEBHOOK_URL = f"https://{APP_NAME}.koyeb.app{WEBHOOK_PATH}"
+up_hosts = {}
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ip_range = update.message.text.strip()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Welcome! Bot is Live and Ready. Use /scan <ip_range> to start scanning!")
 
-    if not ("/" in ip_range and "." in ip_range):
-        await update.message.reply_text("Please send a valid IP range like 192.168.1.0/24")
+async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Please provide an IP range.\nExample: `/scan 192.168.1.0/24`", parse_mode="Markdown")
         return
 
-    await update.message.reply_text(f"Scanning `{ip_range}`... please wait...", parse_mode="Markdown")
+    ip_range = context.args[0]
+    msg = await update.message.reply_text(f"Scanning {ip_range}...\nPlease wait...")
 
-    proc = await asyncio.create_subprocess_shell(
-        f"nmap -v -sn {ip_range}",
+    process = await asyncio.create_subprocess_shell(
+        f"nmap {ip_range} -v -sn",
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await process.communicate()
 
-    result = stdout.decode() or stderr.decode()
-    if not result:
-        result = "No output received."
+    if process.returncode != 0:
+        await update.message.reply_text(f"Error during scan: {stderr.decode()}")
+        return
 
-    if len(result) > 4000:
-        result = result[:4000] + "\n\n[Output truncated]"
+    output = stdout.decode()
+    lines = output.split("\n")
+    up_hosts.clear()
 
-    await update.message.reply_text(f"Scan Result:\n\n{result}")
-    await context.bot.send_message(chat_id=CHANNEL_ID, text=f"Scan on {ip_range} finished!\n\n{result}")
+    for line in lines:
+        if "Nmap scan report for" in line:
+            parts = line.split()
+            ip = parts[-1]
+            name = parts[4] if len(parts) > 5 else "Unknown"
+            up_hosts[ip] = {"name": name}
 
-async def main():
+    if not up_hosts:
+        await update.message.reply_text("No UP hosts found.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(ip, callback_data=ip)]
+        for ip in up_hosts.keys()
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await msg.edit_text("Scan complete!\nClick an IP for details:", reply_markup=reply_markup)
+
+    # Send all results to the channel
+    text_to_channel = "\n".join(f"✅ {ip} ({info['name']})" for ip, info in up_hosts.items())
+    await context.bot.send_message(CHANNEL_ID, f"Scan Result:\n{text_to_channel}")
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    ip = query.data
+    info = up_hosts.get(ip, {"name": "Unknown"})
+
+    text = f"""
+IP: `{ip}`
+Hostname: `{info['name']}`
+Status: `UP`
+"""
+
+    await query.edit_message_text(text=text, parse_mode="Markdown")
+
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("scan", scan))
+    app.add_handler(CallbackQueryHandler(button))
 
-    # Aiohttp server bana rahe
-    async def webhook_handler(request):
-        data = await request.json()
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-        return web.Response()
-
-    app.webhook_server = web.Application()
-    app.webhook_server.router.add_post(WEBHOOK_PATH, webhook_handler)
-
-    # Set webhook URL on Telegram
-    await app.bot.set_webhook(WEBHOOK_URL)
-
-    runner = web.AppRunner(app.webhook_server)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 8080)))
-    await site.start()
-
-    print("Bot started with webhook.")
-    await asyncio.Event().wait()
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080)),
+        webhook_url=f"{APP_URL}/webhook/{BOT_TOKEN}"
+    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
-    
+    main()
