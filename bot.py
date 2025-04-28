@@ -1,9 +1,8 @@
-import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-BOT_TOKEN = os.getenv("8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8")
-KOYEB_APP_NAME = os.getenv("KOYEB_APP_NAME")
+BOT_TOKEN = "8159511483:AAF7WOtZegkLAzrr2uIYXlXU8crlerWHPJ8"
+KOYEB_APP_NAME = "cctv3"  # Koyeb app ka naam yahan hardcoded kar diya
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{KOYEB_APP_NAME}.koyeb.app{WEBHOOK_PATH}"
@@ -29,3 +28,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
