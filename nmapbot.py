@@ -7,6 +7,8 @@ import dns.reversename
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 from aiohttp import web
+import os
+os.system('pip install python-telegram-bot==20.7 --force-reinstall')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
