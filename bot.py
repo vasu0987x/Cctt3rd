@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8020708306:AAHmrEb8nkmBMzEEx_m88Nenyz5QgrQ85hA")
 ADMIN_ID = os.getenv("ADMIN_ID", "6972264549")
 PORT = int(os.getenv("PORT", 8080))
-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "")
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "-1002522049841")
 
 # Initialize users.json
 if not os.path.exists("users.json"):
